@@ -35,3 +35,7 @@ out/
 
 ### VS Code ###
 .vscode/
+/ACCOUNTS.xlsx
+/accounts_output.csv
+/Merchants.xlsx
+/~$ACCOUNTS.xlsx
