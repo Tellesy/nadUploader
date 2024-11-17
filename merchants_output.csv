@@ -1,0 +1,2 @@
+"IBAN","Alias/Response"
+"{number=1201000115925, iban=LY26002001001201000115925, name=متجر}","422 Unprocessable Content: ""{""error"":{""code"":""VAL-101"",""message"":""Invalid input."",""errors"":{""account.iban"":[""account.iban invalid.""]}}}"""

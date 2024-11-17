@@ -19,8 +19,11 @@ import java.util.concurrent.*;
 @SpringBootApplication
 public class NadUploaderApplication implements CommandLineRunner {
 
-    @Value("${api.base-url}")
-    private String apiBaseUrl;
+    @Value("${api.base-url.accounts}")
+    private String accountsBaseUrl;
+
+    @Value("${api.base-url.merchants}")
+    private String merchantsBaseUrl;
 
     @Value("${api.token}")
     private String apiToken;
@@ -33,6 +36,8 @@ public class NadUploaderApplication implements CommandLineRunner {
 
     private final RestTemplate restTemplate = new RestTemplate();
     private final Object fileLock = new Object();
+    private int successCount = 0;
+    private int failureCount = 0;
 
     public static void main(String[] args) {
         SpringApplication.run(NadUploaderApplication.class, args);
@@ -44,8 +49,9 @@ public class NadUploaderApplication implements CommandLineRunner {
 
         System.out.println("Welcome to the NAD Uploader!");
         System.out.println("This tool will help you bulk-enroll your bank customers and merchants into the NAD system.");
-        System.out.println("Please ensure that the base URL and token are correctly set in the properties file.");
-        System.out.println("Base URL: " + apiBaseUrl);
+        System.out.println("Please ensure that the base URLs and token are correctly set in the properties file.");
+        System.out.println("Accounts Base URL: " + accountsBaseUrl);
+        System.out.println("Merchants Base URL: " + merchantsBaseUrl);
         System.out.println("Please make sure that the file is in the correct location.");
 
         if (!confirm(scanner, "Do you want to continue? (yes/no): ")) return;
@@ -77,6 +83,10 @@ public class NadUploaderApplication implements CommandLineRunner {
                 System.out.println("Invalid choice. Please try again.");
             }
         }
+
+        System.out.println("Enrollment process completed.");
+        System.out.println("Successful enrollments: " + successCount);
+        System.out.println("Failed enrollments: " + failureCount);
     }
 
     private boolean confirm(Scanner scanner, String message) {
@@ -126,103 +136,154 @@ public class NadUploaderApplication implements CommandLineRunner {
     }
 
     private void processAccounts(int threadCount) throws Exception {
-        FileInputStream fis = new FileInputStream("ACCOUNTS.xlsx");
-        Workbook workbook = new XSSFWorkbook(fis);
-        Sheet sheet = workbook.getSheetAt(0);
-        int rowCount = sheet.getLastRowNum();
-        System.out.println("Number of customers in the file: " + rowCount);
+        // Ensure the output file is created and write the header
+        initializeOutputFile(accountsOutputFile, new String[]{"IBAN", "Alias/Response"});
 
-        System.out.println("Starting account enrollment process...");
-        ExecutorService executorService = Executors.newFixedThreadPool(threadCount);
+        try (FileInputStream fis = new FileInputStream("ACCOUNTS.xlsx")) {
+            Workbook workbook = new XSSFWorkbook(fis);
+            Sheet sheet = workbook.getSheetAt(0);
+            int rowCount = sheet.getLastRowNum();
+            System.out.println("Number of customers in the file: " + rowCount);
 
-        for (Row row : sheet) {
-            if (row.getRowNum() == 0) continue;
-            executorService.submit(() -> enrollAccount(row));
+            System.out.println("Starting account enrollment process...");
+            ExecutorService executorService = Executors.newFixedThreadPool(threadCount);
+
+            for (Row row : sheet) {
+                if (row.getRowNum() == 0 || isRowEmpty(row)) continue;
+                executorService.submit(() -> enrollAccount(row));
+            }
+
+            executorService.shutdown();
+            executorService.awaitTermination(Long.MAX_VALUE, TimeUnit.MILLISECONDS);
         }
-
-        executorService.shutdown();
-        executorService.awaitTermination(Long.MAX_VALUE, TimeUnit.MILLISECONDS);
-        System.out.println("Account enrollment process completed. Results saved to: " + accountsOutputFile);
-    }
-
-    private void enrollAccount(Row row) {
-        String name = row.getCell(0).getStringCellValue();
-        String iban = row.getCell(1).getStringCellValue();
-        String nationalId = row.getCell(2).getStringCellValue();
-        String passportNo = row.getCell(3).getStringCellValue();
-        String phoneNumber = row.getCell(4).getStringCellValue();
-        String accountNo = row.getCell(5).getStringCellValue();
-
-        Map<String, Object> requestBody = Map.of(
-                "nationalId", nationalId,
-                "phoneNumber", phoneNumber,
-                "passportNumber", passportNo,
-                "account", Map.of(
-                        "name", name,
-                        "number", accountNo,
-                        "iban", iban
-                )
-        );
-
-        System.out.println(requestBody);
-
-        processRequest(requestBody, accountsOutputFile);
     }
 
     private void processMerchants(int threadCount) throws Exception {
-        FileInputStream fis = new FileInputStream("Merchants.xlsx");
-        Workbook workbook = new XSSFWorkbook(fis);
-        Sheet sheet = workbook.getSheetAt(0);
-        int rowCount = sheet.getLastRowNum();
-        System.out.println("Number of merchants in the file: " + rowCount);
+        // Ensure the output file is created and write the header
+        initializeOutputFile(merchantsOutputFile, new String[]{"IBAN", "Alias/Response"});
 
-        System.out.println("Starting merchant enrollment process...");
-        ExecutorService executorService = Executors.newFixedThreadPool(threadCount);
+        try (FileInputStream fis = new FileInputStream("Merchants.xlsx")) {
+            Workbook workbook = new XSSFWorkbook(fis);
+            Sheet sheet = workbook.getSheetAt(0);
+            int rowCount = sheet.getLastRowNum();
+            System.out.println("Number of merchants in the file: " + rowCount);
 
-        for (Row row : sheet) {
-            if (row.getRowNum() == 0) continue;
-            executorService.submit(() -> enrollMerchant(row));
+            System.out.println("Starting merchant enrollment process...");
+            ExecutorService executorService = Executors.newFixedThreadPool(threadCount);
+
+            for (Row row : sheet) {
+                if (row.getRowNum() == 0 || isRowEmpty(row)) continue;
+                executorService.submit(() -> enrollMerchant(row));
+            }
+
+            executorService.shutdown();
+            executorService.awaitTermination(Long.MAX_VALUE, TimeUnit.MILLISECONDS);
         }
+    }
 
-        executorService.shutdown();
-        executorService.awaitTermination(Long.MAX_VALUE, TimeUnit.MILLISECONDS);
-        System.out.println("Merchant enrollment process completed. Results saved to: " + merchantsOutputFile);
+    private void initializeOutputFile(String fileName, String[] headers) {
+        File file = new File(fileName);
+        if (!file.exists()) {
+            try (CSVWriter writer = new CSVWriter(new FileWriter(fileName))) {
+                writer.writeNext(headers);
+            } catch (IOException e) {
+                System.out.println("Error initializing output file: " + e.getMessage());
+            }
+        }
+    }
+
+
+    private void enrollAccount(Row row) {
+        try {
+            String name = row.getCell(0).getStringCellValue();
+            String iban = row.getCell(1).getStringCellValue();
+            String nationalId = row.getCell(2).getStringCellValue();
+            String passportNo = getCellValue(row.getCell(3));
+            String phoneNumber = getCellValue(row.getCell(4));
+            String accountNo = row.getCell(5).getStringCellValue();
+
+            Map<String, Object> requestBody = Map.of(
+                    "nationalId", nationalId,
+                    "phoneNumber", phoneNumber,
+                    "passportNumber", passportNo,
+                    "account", Map.of(
+                            "name", name,
+                            "number", accountNo,
+                            "iban", iban
+                    )
+            );
+
+            processRequest(requestBody, accountsOutputFile, accountsBaseUrl);
+        } catch (Exception e) {
+            System.out.println("Error processing account row: " + e.getMessage());
+            incrementFailure();
+        }
     }
 
     private void enrollMerchant(Row row) {
-        String iban = row.getCell(1).getStringCellValue();
-        String nationalId = row.getCell(2).getStringCellValue();
-        String passportNo = getCellValue(row.getCell(3));
-        String phoneNumber = getCellValue(row.getCell(4));
-        String tradeLicense = getCellValue(row.getCell(7));
-        String merchantName = row.getCell(0).getStringCellValue();
-        String mcc = row.getCell(6).getStringCellValue();
+        try {
+            String merchantName = getNonEmptyValue(row.getCell(0)); // Required
+            String iban = getNonEmptyValue(row.getCell(1)); // Required
+            String nationalId = getNonEmptyValue(row.getCell(2)); // Required
+            String passportNo = getOptionalValue(row.getCell(3)); // Optional
+            String phoneNumber = getOptionalValue(row.getCell(4)); // Optional
+            String accountNo = getNonEmptyValue(row.getCell(5)); // Required
+            String mcc = getNonEmptyValue(row.getCell(6)); // Required
+            String tradeLicense = getOptionalValue(row.getCell(7)); // Optional
 
-        Map<String, Object> requestBody = Map.of(
-                "nationalId", nationalId,
-                "phoneNumber", phoneNumber,
-                "passportNumber", passportNo,
-                "merchant", Map.of(
-                        "tradeLicenseNumber", tradeLicense,
-                        "name", merchantName,
-                        "mcc", mcc,
-                        "address", "Libya"
-                ),
-                "account", Map.of(
-                        "iban", iban,
-                        "name", merchantName,
-                        "number", row.getCell(5).getStringCellValue()
-                )
-        );
+            // Build the request body, allowing null for optional fields
+            Map<String, Object> merchantData = new HashMap<>();
+            merchantData.put("name", merchantName);
+            merchantData.put("mcc", mcc);
+            merchantData.put("address", "Libya"); // Default value for address
+            if (tradeLicense != null && !tradeLicense.isEmpty()) {
+                merchantData.put("tradeLicenseNumber", tradeLicense);
+            }
 
-        processRequest(requestBody, merchantsOutputFile);
+            Map<String, Object> accountData = new HashMap<>();
+            accountData.put("iban", iban);
+            accountData.put("name", merchantName);
+            accountData.put("number", accountNo);
+
+            Map<String, Object> requestBody = new HashMap<>();
+            requestBody.put("nationalId", nationalId);
+            if (passportNo != null && !passportNo.isEmpty()) {
+                requestBody.put("passportNumber", passportNo);
+            }
+            if (phoneNumber != null && !phoneNumber.isEmpty()) {
+                requestBody.put("phoneNumber", phoneNumber);
+            }
+            requestBody.put("merchant", merchantData);
+            requestBody.put("account", accountData);
+
+            System.out.println(requestBody);
+            processRequest(requestBody, merchantsOutputFile, merchantsBaseUrl);
+        } catch (Exception e) {
+            System.out.println("Error processing merchant row: " + e.getMessage());
+            incrementFailure();
+        }
+    }
+    private String getOptionalValue(Cell cell) {
+        String value = getCellValue(cell);
+        return (value == null || value.trim().isEmpty()) ? null : value.trim();
+    }
+
+    private String getNonEmptyValue(Cell cell) {
+        String value = getCellValue(cell);
+        if (value == null || value.trim().isEmpty()) {
+            throw new IllegalArgumentException("Required field is missing or empty.");
+        }
+        return value.trim();
     }
 
     private String getCellValue(Cell cell) {
-        return cell == null ? null : cell.getStringCellValue();
+        return (cell == null || cell.getCellType() == CellType.BLANK) ? null : cell.getStringCellValue();
     }
 
-    private void processRequest(Map<String, Object> requestBody, String outputFile) {
+
+
+
+    private void processRequest(Map<String, Object> requestBody, String outputFile, String baseUrl) {
         HttpHeaders headers = new HttpHeaders();
         headers.set("Content-Type", "application/json");
         headers.set("Authorization", apiToken);
@@ -231,20 +292,32 @@ public class NadUploaderApplication implements CommandLineRunner {
         String[] result;
 
         try {
-            ResponseEntity<Map> apiResponse = restTemplate.postForEntity(apiBaseUrl, request, Map.class);
+            ResponseEntity<Map> apiResponse = restTemplate.postForEntity(baseUrl, request, Map.class);
             if (apiResponse.getStatusCodeValue() == 201) {
                 String alias = (String) ((Map) apiResponse.getBody().get("data")).get("alias");
                 result = new String[]{requestBody.get("account").toString(), alias};
+                incrementSuccess();
             } else {
-                result = new String[]{requestBody.get("account").toString(), apiResponse.getBody().toString()};
+                result = new String[]{requestBody
+                        .get("account").toString(), apiResponse.getBody().toString()};
+                incrementFailure();
             }
         } catch (Exception e) {
             result = new String[]{requestBody.get("account").toString(), e.getMessage()};
+            incrementFailure();
         }
 
         synchronized (fileLock) {
             saveResult(result, outputFile);
         }
+    }
+
+    private synchronized void incrementSuccess() {
+        successCount++;
+    }
+
+    private synchronized void incrementFailure() {
+        failureCount++;
     }
 
     private void saveResult(String[] result, String outputFile) {
@@ -253,5 +326,14 @@ public class NadUploaderApplication implements CommandLineRunner {
         } catch (IOException e) {
             System.out.println("Error writing to CSV: " + e.getMessage());
         }
+    }
+
+    private boolean isRowEmpty(Row row) {
+        for (Cell cell : row) {
+            if (cell != null && cell.getCellType() != CellType.BLANK) {
+                return false;
+            }
+        }
+        return true;
     }
 }
