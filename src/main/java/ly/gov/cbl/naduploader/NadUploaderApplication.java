@@ -2,6 +2,7 @@ package ly.gov.cbl.naduploader;
 
 import org.apache.poi.ss.usermodel.*;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.SpringApplication;
@@ -13,11 +14,14 @@ import org.springframework.web.client.RestTemplate;
 import com.opencsv.CSVWriter;
 
 import java.io.*;
+import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.stream.IntStream;
 
 @SpringBootApplication
 public class NadUploaderApplication implements CommandLineRunner {
+
 
     @Value("${api.base-url.accounts}")
     private String accountsBaseUrl;
@@ -52,7 +56,6 @@ public class NadUploaderApplication implements CommandLineRunner {
         System.out.println("Please ensure that the base URLs and token are correctly set in the properties file.");
         System.out.println("Accounts Base URL: " + accountsBaseUrl);
         System.out.println("Merchants Base URL: " + merchantsBaseUrl);
-        System.out.println("Please make sure that the file is in the correct location.");
 
         if (!confirm(scanner, "Do you want to continue? (yes/no): ")) return;
 
@@ -67,273 +70,201 @@ public class NadUploaderApplication implements CommandLineRunner {
             int choice = scanner.nextInt();
             scanner.nextLine();
 
+            String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
+            accountsOutputFile = accountsOutputFile.replace(".csv", "_" + timestamp + ".csv");
+            merchantsOutputFile = merchantsOutputFile.replace(".csv", "_" + timestamp + ".csv");
+
             if (choice == 1) {
-                if (!processFile(scanner, "ACCOUNTS.xlsx", "Please place the accounts file at: " + new File(".").getAbsolutePath())) {
+                String fileName = getFileName(scanner, "ACCOUNTS.xlsx");
+                if (!processFile(fileName, "Please place the accounts file at: " + new File(".").getAbsolutePath())) {
                     continue;
                 }
-                processAccounts(threadCount);
+                processAccounts(threadCount, fileName, timestamp);
                 break;
             } else if (choice == 2) {
-                if (!processFile(scanner, "Merchants.xlsx", "Please place the merchants file at: " + new File(".").getAbsolutePath())) {
+                String fileName = getFileName(scanner, "Merchants.xlsx");
+                if (!processFile(fileName, "Please place the merchants file at: " + new File(".").getAbsolutePath())) {
                     continue;
                 }
-                processMerchants(threadCount);
+                processMerchants(threadCount, fileName, timestamp);
                 break;
             } else {
                 System.out.println("Invalid choice. Please try again.");
             }
         }
 
-        System.out.println("Enrollment process completed.");
+        System.out.println("\nEnrollment process completed.");
         System.out.println("Successful enrollments: " + successCount);
         System.out.println("Failed enrollments: " + failureCount);
     }
 
-    private boolean confirm(Scanner scanner, String message) {
-        while (true) {
-            System.out.print(message);
-            String response = scanner.nextLine().trim().toLowerCase();
-            if (response.equals("yes")) {
-                return true;
-            } else if (response.equals("no")) {
-                System.out.println("Exiting the tool. Goodbye!");
-                return false;
-            } else {
-                System.out.println("Invalid input. Please enter 'yes' or 'no'.");
-            }
-        }
+    private String getFileName(Scanner scanner, String defaultFileName) {
+        System.out.print("Enter the file name (" + defaultFileName + "): ");
+        String input = scanner.nextLine().trim();
+        return input.isEmpty() ? defaultFileName : input;
     }
 
-    private int getThreadCount(Scanner scanner) {
-        while (true) {
-            System.out.print("How many simultaneous operations do you want to run? (1-10): ");
-            try {
-                int threadCount = Integer.parseInt(scanner.nextLine());
-                if (threadCount >= 1 && threadCount <= 10) {
-                    return threadCount;
-                } else {
-                    System.out.println("Invalid input. Please enter a number between 1 and 10.");
-                }
-            } catch (NumberFormatException e) {
-                System.out.println("Invalid input. Please enter a number between 1 and 10.");
-            }
-        }
-    }
-
-    private boolean processFile(Scanner scanner, String fileName, String message) {
-        while (true) {
-            File file = new File(fileName);
-            if (file.exists()) {
-                return true;
-            } else {
-                System.out.println("Error: The file (" + fileName + ") is missing.");
-                System.out.println(message);
-                if (!confirm(scanner, "Do you want to try again? (yes/no): ")) {
-                    return false;
-                }
-            }
-        }
-    }
-
-    private void processAccounts(int threadCount) throws Exception {
-        // Ensure the output file is created and write the header
+    private void processAccounts(int threadCount, String fileName, String timestamp) throws Exception {
         initializeOutputFile(accountsOutputFile, new String[]{"IBAN", "Alias/Response"});
+        String failedAccountsFile = "failed-ACCOUNT_" + timestamp + ".csv";
+        initializeOutputFile(failedAccountsFile, new String[]{"IBAN", "Error"});
 
-        try (FileInputStream fis = new FileInputStream("ACCOUNTS.xlsx")) {
+        try (FileInputStream fis = new FileInputStream(fileName)) {
             Workbook workbook = new XSSFWorkbook(fis);
             Sheet sheet = workbook.getSheetAt(0);
             int rowCount = sheet.getLastRowNum();
             System.out.println("Number of customers in the file: " + rowCount);
 
-            System.out.println("Starting account enrollment process...");
             ExecutorService executorService = Executors.newFixedThreadPool(threadCount);
-
-            for (Row row : sheet) {
-                if (row.getRowNum() == 0 || isRowEmpty(row)) continue;
-                executorService.submit(() -> enrollAccount(row));
-            }
+            IntStream.rangeClosed(1, rowCount).forEach(rowNum -> {
+                Row row = sheet.getRow(rowNum);
+                if (row != null && !isRowEmpty(row)) {
+                    executorService.submit(() -> {
+                        enrollAccount(row, failedAccountsFile);
+                        printProgress(rowNum, rowCount);
+                    });
+                }
+            });
 
             executorService.shutdown();
             executorService.awaitTermination(Long.MAX_VALUE, TimeUnit.MILLISECONDS);
         }
     }
 
-    private void processMerchants(int threadCount) throws Exception {
-        // Ensure the output file is created and write the header
+    private void processMerchants(int threadCount, String fileName, String timestamp) throws Exception {
         initializeOutputFile(merchantsOutputFile, new String[]{"IBAN", "Alias/Response"});
+        String failedMerchantsFile = "failed-MERCHANT_" + timestamp + ".csv";
+        initializeOutputFile(failedMerchantsFile, new String[]{"IBAN", "Error"});
 
-        try (FileInputStream fis = new FileInputStream("Merchants.xlsx")) {
+        try (FileInputStream fis = new FileInputStream(fileName)) {
             Workbook workbook = new XSSFWorkbook(fis);
             Sheet sheet = workbook.getSheetAt(0);
             int rowCount = sheet.getLastRowNum();
             System.out.println("Number of merchants in the file: " + rowCount);
 
-            System.out.println("Starting merchant enrollment process...");
             ExecutorService executorService = Executors.newFixedThreadPool(threadCount);
-
-            for (Row row : sheet) {
-                if (row.getRowNum() == 0 || isRowEmpty(row)) continue;
-                executorService.submit(() -> enrollMerchant(row));
-            }
+            IntStream.rangeClosed(1, rowCount).forEach(rowNum -> {
+                Row row = sheet.getRow(rowNum);
+                if (row != null && !isRowEmpty(row)) {
+                    executorService.submit(() -> {
+                        enrollMerchant(row, failedMerchantsFile);
+                        printProgress(rowNum, rowCount);
+                    });
+                }
+            });
 
             executorService.shutdown();
             executorService.awaitTermination(Long.MAX_VALUE, TimeUnit.MILLISECONDS);
         }
     }
 
-    private void initializeOutputFile(String fileName, String[] headers) {
+    private boolean processFile(String fileName, String message) {
         File file = new File(fileName);
         if (!file.exists()) {
-            try (CSVWriter writer = new CSVWriter(new FileWriter(fileName))) {
-                writer.writeNext(headers);
-            } catch (IOException e) {
-                System.out.println("Error initializing output file: " + e.getMessage());
-            }
+            System.out.println("Error: File " + fileName + " does not exist.");
+            System.out.println(message);
+            return false;
         }
+        return true;
     }
 
-
-    private void enrollAccount(Row row) {
+    private void enrollAccount(Row row, String failedFile) {
         try {
-            String name = row.getCell(0).getStringCellValue();
             String iban = row.getCell(1).getStringCellValue();
-            String nationalId = row.getCell(2).getStringCellValue();
-            String passportNo = getCellValue(row.getCell(3));
-            String phoneNumber = getCellValue(row.getCell(4));
-            String accountNo = row.getCell(5).getStringCellValue();
-
-            Map<String, Object> requestBody = Map.of(
-                    "nationalId", nationalId,
-                    "phoneNumber", phoneNumber,
-                    "passportNumber", passportNo,
-                    "account", Map.of(
-                            "name", name,
-                            "number", accountNo,
-                            "iban", iban
-                    )
-            );
-
+            Map<String, Object> requestBody = Map.of("iban", iban);
             processRequest(requestBody, accountsOutputFile, accountsBaseUrl);
         } catch (Exception e) {
-            System.out.println("Error processing account row: " + e.getMessage());
+            saveFailedRequest(failedFile, new String[]{"IBAN data", e.getMessage()});
             incrementFailure();
         }
     }
 
-    private void enrollMerchant(Row row) {
+    private void enrollMerchant(Row row, String failedFile) {
         try {
-            String merchantName = getNonEmptyValue(row.getCell(0)); // Required
-            String iban = getNonEmptyValue(row.getCell(1)); // Required
-            String nationalId = getNonEmptyValue(row.getCell(2)); // Required
-            String passportNo = getOptionalValue(row.getCell(3)); // Optional
-            String phoneNumber = getOptionalValue(row.getCell(4)); // Optional
-            String accountNo = getNonEmptyValue(row.getCell(5)); // Required
-            String mcc = getNonEmptyValue(row.getCell(6)); // Required
-            String tradeLicense = getOptionalValue(row.getCell(7)); // Optional
-
-            // Build the request body, allowing null for optional fields
-            Map<String, Object> merchantData = new HashMap<>();
-            merchantData.put("name", merchantName);
-            merchantData.put("mcc", mcc);
-            merchantData.put("address", "Libya"); // Default value for address
-            if (tradeLicense != null && !tradeLicense.isEmpty()) {
-                merchantData.put("tradeLicenseNumber", tradeLicense);
-            }
-
-            Map<String, Object> accountData = new HashMap<>();
-            accountData.put("iban", iban);
-            accountData.put("name", merchantName);
-            accountData.put("number", accountNo);
-
-            Map<String, Object> requestBody = new HashMap<>();
-            requestBody.put("nationalId", nationalId);
-            if (passportNo != null && !passportNo.isEmpty()) {
-                requestBody.put("passportNumber", passportNo);
-            }
-            if (phoneNumber != null && !phoneNumber.isEmpty()) {
-                requestBody.put("phoneNumber", phoneNumber);
-            }
-            requestBody.put("merchant", merchantData);
-            requestBody.put("account", accountData);
-
-            System.out.println(requestBody);
+            String iban = row.getCell(1).getStringCellValue();
+            Map<String, Object> requestBody = Map.of("iban", iban);
             processRequest(requestBody, merchantsOutputFile, merchantsBaseUrl);
         } catch (Exception e) {
-            System.out.println("Error processing merchant row: " + e.getMessage());
+            saveFailedRequest(failedFile, new String[]{"Merchant IBAN", e.getMessage()});
             incrementFailure();
         }
     }
-    private String getOptionalValue(Cell cell) {
-        String value = getCellValue(cell);
-        return (value == null || value.trim().isEmpty()) ? null : value.trim();
-    }
 
-    private String getNonEmptyValue(Cell cell) {
-        String value = getCellValue(cell);
-        if (value == null || value.trim().isEmpty()) {
-            throw new IllegalArgumentException("Required field is missing or empty.");
-        }
-        return value.trim();
-    }
-
-    private String getCellValue(Cell cell) {
-        return (cell == null || cell.getCellType() == CellType.BLANK) ? null : cell.getStringCellValue();
-    }
-
-
-
-
-    private void processRequest(Map<String, Object> requestBody, String outputFile, String baseUrl) {
-        HttpHeaders headers = new HttpHeaders();
-        headers.set("Content-Type", "application/json");
-        headers.set("Authorization", apiToken);
-
-        HttpEntity<Map<String, Object>> request = new HttpEntity<>(requestBody, headers);
-        String[] result;
-
-        try {
-            ResponseEntity<Map> apiResponse = restTemplate.postForEntity(baseUrl, request, Map.class);
-            if (apiResponse.getStatusCodeValue() == 201) {
-                String alias = (String) ((Map) apiResponse.getBody().get("data")).get("alias");
-                result = new String[]{requestBody.get("account").toString(), alias};
-                incrementSuccess();
-            } else {
-                result = new String[]{requestBody
-                        .get("account").toString(), apiResponse.getBody().toString()};
-                incrementFailure();
-            }
-        } catch (Exception e) {
-            result = new String[]{requestBody.get("account").toString(), e.getMessage()};
-            incrementFailure();
-        }
-
+    private void saveFailedRequest(String failedFile, String[] failedData) {
         synchronized (fileLock) {
-            saveResult(result, outputFile);
+            try (CSVWriter writer = new CSVWriter(new FileWriter(failedFile, true))) {
+                writer.writeNext(failedData);
+            } catch (IOException e) {
+                System.out.println("Error writing to failed file: " + e.getMessage());
+            }
         }
     }
 
-    private synchronized void incrementSuccess() {
-        successCount++;
+    private void printProgress(int current, int total) {
+        int percent = (int) ((current / (float) total) * 100);
+        System.out.print("\rProgress: " + percent + "% | Successful: " + successCount + " | Failed: " + failureCount);
     }
 
-    private synchronized void incrementFailure() {
-        failureCount++;
-    }
-
-    private void saveResult(String[] result, String outputFile) {
-        try (CSVWriter writer = new CSVWriter(new FileWriter(outputFile, true))) {
-            writer.writeNext(result);
+    private void initializeOutputFile(String fileName, String[] headers) {
+        try (CSVWriter writer = new CSVWriter(new FileWriter(fileName))) {
+            writer.writeNext(headers);
         } catch (IOException e) {
-            System.out.println("Error writing to CSV: " + e.getMessage());
+            System.out.println("Error initializing output file: " + e.getMessage());
         }
     }
 
     private boolean isRowEmpty(Row row) {
-        for (Cell cell : row) {
-            if (cell != null && cell.getCellType() != CellType.BLANK) {
-                return false;
-            }
+        return IntStream.range(0, row.getLastCellNum()).allMatch(i -> {
+            Cell cell = row.getCell(i);
+            return cell == null || cell.getCellType() == CellType.BLANK;
+        });
+    }
+
+    private boolean confirm(Scanner scanner, String message) {
+        System.out.print(message);
+        String input = scanner.nextLine().trim();
+        return input.equalsIgnoreCase("yes");
+    }
+
+    private int getThreadCount(Scanner scanner) {
+        System.out.print("Enter the number of threads to use (1-10): ");
+        int threadCount = scanner.nextInt();
+        scanner.nextLine();
+        return Math.min(10, Math.max(1, threadCount));
+    }
+
+    private void incrementSuccess() {
+        synchronized (fileLock) {
+            successCount++;
         }
-        return true;
+    }
+
+    private void incrementFailure() {
+        synchronized (fileLock) {
+            failureCount++;
+        }
+    }
+
+    private void processRequest(Map<String, Object> requestBody, String outputFile, String baseUrl) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("Authorization", "Bearer " + apiToken);
+        headers.set("Content-Type", "application/json");
+
+        HttpEntity<Map<String, Object>> request = new HttpEntity<>(requestBody, headers);
+        try {
+            ResponseEntity<Map> response = restTemplate.postForEntity(baseUrl, request, Map.class);
+            if (response.getStatusCode().is2xxSuccessful()) {
+                incrementSuccess();
+                synchronized (fileLock) {
+                    try (CSVWriter writer = new CSVWriter(new FileWriter(outputFile, true))) {
+                        writer.writeNext(new String[]{(String) requestBody.get("iban"), "Success"});
+                    }
+                }
+            } else {
+                incrementFailure();
+            }
+        } catch (Exception e) {
+            incrementFailure();
+        }
     }
 }
