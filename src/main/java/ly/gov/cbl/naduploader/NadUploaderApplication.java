@@ -194,13 +194,20 @@ public class NadUploaderApplication implements CommandLineRunner {
 
 
     private void enrollAccount(Row row) {
+        int cellNumber = -1;
         try {
             String name = row.getCell(0).getStringCellValue();
+            cellNumber=0;
             String iban = row.getCell(1).getStringCellValue();
+            cellNumber=1;
             String nationalId = row.getCell(2).getStringCellValue();
+            cellNumber=2;
             String passportNo = getCellValue(row.getCell(3));
+            cellNumber=3;
             String phoneNumber = getCellValue(row.getCell(4));
+            cellNumber=4;
             String accountNo = row.getCell(5).getStringCellValue();
+            cellNumber=5;
 
             Map<String, Object> requestBody = Map.of(
                     "nationalId", nationalId,
@@ -215,7 +222,7 @@ public class NadUploaderApplication implements CommandLineRunner {
 
             processRequest(requestBody, accountsOutputFile, accountsBaseUrl);
         } catch (Exception e) {
-            System.out.println("Error processing account row: " + e.getMessage());
+            System.out.println("Error processing account row: " + row.getRowNum() + " Cell Number: " + cellNumber++ +" "+ e.getMessage() + " " );
             incrementFailure();
         }
     }
